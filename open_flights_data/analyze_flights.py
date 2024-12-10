@@ -2,17 +2,24 @@ import pandas as pd
 import networkx as nx
 import matplotlib.pyplot as plt
 import os
+import sys
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from matplotlib.patches import FancyArrowPatch
+import csv 
 
-script_dir = os.path.dirname(os.path.abspath(__file__))
+def get_script_dir():
+    try:
+        return os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        return os.getcwd()
+
+script_dir = get_script_dir()
 data_dir = script_dir 
 
 routes_file = os.path.join(data_dir, 'routes.csv')
 airlines_file = os.path.join(data_dir, 'airlines.dat')
 airports_file = os.path.join(data_dir, 'airports.dat')
-
 
 routes_columns = [
     'Airline', 'Airline_ID', 'Source_airport', 'Source_airport_ID',
@@ -31,42 +38,61 @@ airports_columns = [
     'Tz', 'Type', 'Source'
 ]
 
+def read_data(file_path, columns, file_type='csv'):
+    if not os.path.exists(file_path):
+        print(f"Error: {file_path} not found.")
+        sys.exit(1)
+    try:
+        if file_type == 'csv':
+            df = pd.read_csv(file_path, header=0, names=columns, encoding='latin1')
+        elif file_type == 'dat':
+            df = pd.read_csv(
+                file_path,
+                header=None,
+                names=columns,
+                encoding='latin1',
+                delimiter=',',
+                engine='python',
+                quoting=csv.QUOTE_MINIMAL,
+                quotechar='"',
+                na_values=['\\N'],
+                keep_default_na=False,
+                dtype=str
+            )
+        else:
+            raise ValueError("Unsupported file type.")
+        print(f"Loaded {file_path} successfully.")
+        return df
+    except Exception as e:
+        print(f"Error reading {file_path}: {e}")
+        sys.exit(1)
+
 # Load Data
+routes = read_data(routes_file, routes_columns, file_type='csv')
+print("\nRoutes Data:")
+print(routes.head())
 
-try:
-    routes = pd.read_csv(routes_file, header=0, names=routes_columns, encoding='latin1')
-    print("Routes Data:")
-    print(routes.head())
-except FileNotFoundError:
-    print(f"Error: {routes_file} not found.")
-    exit()
+airlines = read_data(airlines_file, airlines_columns, file_type='dat')
+print("\nAirlines Data:")
+print(airlines.head())
 
-try:
-    airlines = pd.read_csv(airlines_file, header=None, names=airlines_columns, encoding='latin1')
-    print("\nAirlines Data:")
-    print(airlines.head())
-except FileNotFoundError:
-    print(f"Error: {airlines_file} not found.")
-    exit()
-
-try:
-    airports = pd.read_csv(airports_file, header=None, names=airports_columns, encoding='latin1')
-    print("\nAirports Data:")
-    print(airports.head())
-except FileNotFoundError:
-    print(f"Error: {airports_file} not found.")
-    exit()
+airports = read_data(airports_file, airports_columns, file_type='dat')
+print("\nAirports Data:")
+print(airports.head())
 
 # Data Cleaning: Replace '\\N' with NaN for better handling
 routes.replace('\\N', pd.NA, inplace=True)
 airlines.replace('\\N', pd.NA, inplace=True)
 airports.replace('\\N', pd.NA, inplace=True)
-routes['Stops'] = pd.to_numeric(routes['Stops'], errors='coerce')
 
+routes['Stops'] = pd.to_numeric(routes['Stops'], errors='coerce')
 routes['Airline'] = routes['Airline'].astype(str)
 airlines['IATA'] = airlines['IATA'].astype(str)
 routes['Source_airport'] = routes['Source_airport'].astype(str)
 routes['Destination_airport'] = routes['Destination_airport'].astype(str)
+
+airports['Latitude'] = pd.to_numeric(airports['Latitude'], errors='coerce')
+airports['Longitude'] = pd.to_numeric(airports['Longitude'], errors='coerce')
 
 # Merge routes with airlines on IATA codes
 routes = routes.merge(
@@ -76,6 +102,7 @@ routes = routes.merge(
     suffixes=('', '_airline')
 )
 
+# Merge routes with airports for Source
 routes = routes.merge(
     airports[['IATA', 'Country', 'Latitude', 'Longitude']],
     left_on='Source_airport', right_on='IATA',
@@ -83,62 +110,133 @@ routes = routes.merge(
     suffixes=('', '_source')
 )
 
+# Merge routes with airports for Destination
 routes = routes.merge(
     airports[['IATA', 'Country', 'Latitude', 'Longitude']],
     left_on='Destination_airport', right_on='IATA',
     how='left',
     suffixes=('', '_dest')
 )
+
 print("\nMerged Routes Data:")
 print(routes.head())
 
-G = nx.DiGraph()
+# Initialize an undirected graph
+G = nx.Graph()
 
 for index, row in routes.iterrows():
     source_country = row['Country_source']
     dest_country = row['Country_dest']
     stops = row['Stops']
     
-    # Ensure both source and destination countries are not missing
     if pd.notna(source_country) and pd.notna(dest_country):
         # Avoid routes within the same country
         if source_country != dest_country:
-            # Add an edge from source_country to dest_country with 'stops' as weight
-            if G.has_edge(source_country, dest_country):
-                G[source_country][dest_country]['stops'] += stops
-            else:
-                G.add_edge(source_country, dest_country, stops=stops)
+            # Since it's an undirected graph, multiple routes between the same countries are treated as a single connection
+            G.add_edge(source_country, dest_country, stops=stops if pd.notna(stops) else 0)
 
 print("\nGraph Information:")
-print("Number of nodes:", G.number_of_nodes())
-print("Number of edges:", G.number_of_edges())
+print(f"Number of nodes: {G.number_of_nodes()}")
+print(f"Number of edges: {G.number_of_edges()}")
 
-# ------------------------------------------------------------------------------------
+# Calculate Degree Centrality
 degree_centrality = nx.degree_centrality(G)
 degree_df = pd.DataFrame(list(degree_centrality.items()), columns=['Country', 'Degree_Centrality'])
 
-# Sort by Degree Centrality in ascending order to find least connected countries
-degree_df_sorted = degree_df.sort_values(by='Degree_Centrality', ascending=True)
-
-print("\nTop 10 Most Antisocial Countries (Least Connected):")
-print(degree_df_sorted.head(10))
-
+# Calculate Closeness Centrality
 closeness_centrality = nx.closeness_centrality(G)
 closeness_df = pd.DataFrame(list(closeness_centrality.items()), columns=['Country', 'Closeness_Centrality'])
 
-# Sort by Closeness Centrality in descending order to find most accessible countries
-closeness_df_sorted = closeness_df.sort_values(by='Closeness_Centrality', ascending=False)
-from matplotlib.patches import FancyArrowPatch
+closeness_least_accessible = closeness_df.sort_values(by='Closeness_Centrality', ascending=True)
+closeness_most_accessible = closeness_df.sort_values(by='Closeness_Centrality', ascending=False)
 
-print("\nTop 10 Most Accessible Countries:")
-print(closeness_df_sorted.head(10))
+degree_least_accessible = degree_df.sort_values(by='Degree_Centrality', ascending=True)
+degree_most_accessible = degree_df.sort_values(by='Degree_Centrality', ascending=False)
+
+top_least_accessible_closeness = closeness_least_accessible.head(15)
+top_most_accessible_closeness = closeness_most_accessible.head(15)
+
+top_least_accessible_degree = degree_least_accessible.head(15)
+top_most_accessible_degree = degree_most_accessible.head(15)
+
+def plot_top_countries(data, country_col, centrality_col, title, color, top_n, figsize=(12, 8)):
+    """
+    Plots a bar chart for the top N countries based on a centrality measure.
+
+    Parameters:
+    - data (DataFrame): The data containing countries and their centrality measures.
+    - country_col (str): The column name for countries.
+    - centrality_col (str): The column name for centrality measures.
+    - title (str): The title of the plot.
+    - color (str): The color of the bars.
+    - top_n (int): The number of top items to display.
+    - figsize (tuple): The size of the figure.
+    """
+    top_data = data.head(top_n)
+    
+    plt.figure(figsize=figsize)
+    bars = plt.bar(top_data[country_col], top_data[centrality_col], color=color)
+    plt.xlabel('Country')
+    plt.ylabel(centrality_col.replace('_', ' ').title())
+    plt.title(title)
+    plt.xticks(rotation=45, ha='right')
+    
+    # Add data labels on top of each bar
+    for bar in bars:
+        height = bar.get_height()
+        plt.annotate(f'{height:.4f}',
+                     xy=(bar.get_x() + bar.get_width() / 2, height),
+                     xytext=(0, 3),
+                     textcoords="offset points",
+                     ha='center', va='bottom', fontsize=8)
+    
+    plt.tight_layout()
+    plt.show()
+
+
+plot_top_countries(
+    data=top_least_accessible_closeness,
+    country_col='Country',
+    centrality_col='Closeness_Centrality',
+    title='Top 15 Least Accessible Countries by Closeness Centrality',
+    color='lightcoral',
+    top_n=20
+)
+
+plot_top_countries(
+    data=top_most_accessible_closeness,
+    country_col='Country',
+    centrality_col='Closeness_Centrality',
+    title='Top 15 Most Accessible Countries by Closeness Centrality',
+    color='steelblue',
+    top_n=15
+)
+
+plot_top_countries(
+    data=top_least_accessible_degree,
+    country_col='Country',
+    centrality_col='Degree_Centrality',
+    title='Top 15 Least Accessible Countries by Degree Centrality',
+    color='salmon',
+    top_n=15
+)
+
+plot_top_countries(
+    data=top_most_accessible_degree,
+    country_col='Country',
+    centrality_col='Degree_Centrality',
+    title='Top 15 Most Accessible Countries by Degree Centrality',
+    color='mediumseagreen',
+    top_n=15
+)
 
 # ------------------------------------------------------------------------------------
-source_country = 'United States'
-target_country = 'North Korea'
+# Find the shortest path from United States to North Korea
+source_country = 'Greece'
+target_country = 'Cocos (Keeling) Islands'
 
 try:
-    shortest_path = nx.shortest_path(G, source=source_country, target=target_country, weight='stops')
+    shortest_path = nx.shortest_path(G, source=source_country, target=target_country)
     path_length = len(shortest_path) - 1
     print(f"\nShortest path from {source_country} to {target_country}: {' -> '.join(shortest_path)}")
     print(f"Number of hops: {path_length}")
@@ -151,89 +249,78 @@ except nx.NodeNotFound as e:
 
 if len(shortest_path) <= 1:
     print("No path to plot.")
-    exit()
-
-# Compute country coordinates
-country_coords = airports.groupby('Country').agg({'Latitude': 'mean', 'Longitude': 'mean'}).reset_index()
-country_coords_dict = {row['Country']: (row['Latitude'], row['Longitude']) for _, row in country_coords.iterrows()}
-
-path_edges = list(zip(shortest_path, shortest_path[1:]))
-
-plt.figure(figsize=(12, 8))
-ax = plt.axes(projection=ccrs.PlateCarree())
-ax.add_feature(cfeature.COASTLINE)
-ax.add_feature(cfeature.BORDERS, linestyle=':')
-ax.set_global()
-
-# Plot nodes and add a number above them
-for i, country in enumerate(shortest_path):
-    if country in country_coords_dict:
-        lat, lon = country_coords_dict[country]
-        plt.plot(lon, lat, marker='o', color='red', markersize=5, transform=ccrs.PlateCarree())
-        plt.text(lon+1, lat+1, f"{country}\n({i})", transform=ccrs.PlateCarree(), fontsize=8, ha='center', va='bottom')
-
-# Plot directed edges 
-for u, v in path_edges:
-    if u in country_coords_dict and v in country_coords_dict:
-        lat_u, lon_u = country_coords_dict[u]
-        lat_v, lon_v = country_coords_dict[v]
-        
-        arrow = FancyArrowPatch((lon_u, lat_u), (lon_v, lat_v),
-                                transform=ccrs.PlateCarree(),
-                                arrowstyle='->', color='blue', mutation_scale=15, linewidth=1)
-        ax.add_patch(arrow)
-
-plt.title(f"Directed Shortest Path from {source_country} to {target_country}")
-plt.show()
-
-top_antisocial = degree_df_sorted.head(30)
-
-plt.figure(figsize=(10, 6))
-plt.bar(top_antisocial['Country'], top_antisocial['Degree_Centrality'], color='salmon')
-plt.xlabel('Country')
-plt.ylabel('Degree Centrality')
-plt.title('Top 10 Most Antisocial Countries by Direct Airline Connections')
-plt.xticks(rotation=45, ha='right')
-plt.tight_layout()
-plt.show()
-
-top_accessible = closeness_df_sorted.head(30)
-
-plt.figure(figsize=(10, 6))
-plt.bar(top_accessible['Country'], top_accessible['Closeness_Centrality'], color='skyblue')
-plt.xlabel('Country')
-plt.ylabel('Closeness Centrality')
-plt.title('Top 10 Most Accessible Countries by Closeness Centrality')
-plt.xticks(rotation=45, ha='right')
-plt.tight_layout()
-plt.show()
+else:
+    # Compute country coordinates
+    country_coords = airports.groupby('Country').agg({'Latitude': 'mean', 'Longitude': 'mean'}).reset_index()
+    country_coords_dict = {}
+    for _, row in country_coords.iterrows():
+        country = row['Country']
+        try:
+            lat = float(row['Latitude'])
+            lon = float(row['Longitude'])
+            country_coords_dict[country] = (lat, lon)
+        except (ValueError, TypeError):
+            continue
+    
+    path_edges = list(zip(shortest_path, shortest_path[1:]))
+    
+    plt.figure(figsize=(12, 8))
+    ax = plt.axes(projection=ccrs.PlateCarree())
+    ax.add_feature(cfeature.COASTLINE)
+    ax.add_feature(cfeature.BORDERS, linestyle=':')
+    ax.set_global()
+    
+    # Plot nodes and add a number above them
+    for i, country in enumerate(shortest_path):
+        if country in country_coords_dict:
+            lat, lon = country_coords_dict[country]
+            plt.plot(lon, lat, marker='o', color='red', markersize=5, transform=ccrs.PlateCarree())
+            plt.text(lon + 1, lat + 1, f"{country}\n({i})", transform=ccrs.PlateCarree(),
+                     fontsize=8, ha='center', va='bottom')
+    
+    # Plot directed edges 
+    for u, v in path_edges:
+        if u in country_coords_dict and v in country_coords_dict:
+            lat_u, lon_u = country_coords_dict[u]
+            lat_v, lon_v = country_coords_dict[v]
+            
+            arrow = FancyArrowPatch((lon_u, lat_u), (lon_v, lat_v),
+                                    transform=ccrs.PlateCarree(),
+                                    arrowstyle='->', color='blue', mutation_scale=15, linewidth=1)
+            ax.add_patch(arrow)
+    
+    plt.title(f"Shortest Path from {source_country} to {target_country}")
+    plt.show()
 
 # ------------------------------------------------------------------------------------
-most_unpopular_country = degree_df_sorted.iloc[23]['Country']
-most_unpopular_country = degree_df_sorted.iloc[1]['Country']
+degree_df_sorted_asc = degree_df.sort_values(by='Degree_Centrality', ascending=True)
 
+most_unpopular_country = degree_df_sorted_asc.iloc[1]['Country']
 print(f"\nMost Unpopular Country: {most_unpopular_country}")
 
-## Find all countries within 2 hops from the most unpopular country
 hops = 2
-neighbors_within_2_hops = nx.single_source_shortest_path(G, most_unpopular_country, cutoff=hops)
+neighbors_within_hops = nx.single_source_shortest_path(G, most_unpopular_country, cutoff=hops)
 
-# Extract edges that are part of the shortest paths
 edges_in_shortest_paths = set()
-for target in neighbors_within_2_hops:
-    path = neighbors_within_2_hops[target]
-    edges_in_path = list(zip(path, path[1:]))
-    edges_in_shortest_paths.update(edges_in_path)
+for target, path in neighbors_within_hops.items():
+    if len(path) >= 2:
+        edges_in_path = list(zip(path, path[1:]))
+        edges_in_shortest_paths.update(edges_in_path)
 
 # Create the subgraph using only the edges
-simplified_subgraph = nx.DiGraph()
+simplified_subgraph = nx.Graph()
 simplified_subgraph.add_edges_from(edges_in_shortest_paths)
 
-
-# ------------------------------------------------------------------------------------
-# latitude and longitude of all airports in that country for the mapping.
 country_coords = airports.groupby('Country').agg({'Latitude': 'mean', 'Longitude': 'mean'}).reset_index()
-country_coords_dict = {row['Country']: (row['Latitude'], row['Longitude']) for _, row in country_coords.iterrows()}
+country_coords_dict = {}
+for _, row in country_coords.iterrows():
+    country = row['Country']
+    try:
+        lat = float(row['Latitude'])
+        lon = float(row['Longitude'])
+        country_coords_dict[country] = (lat, lon)
+    except (ValueError, TypeError):
+        continue
 
 plt.figure(figsize=(12, 8))
 ax = plt.axes(projection=ccrs.PlateCarree())
@@ -241,19 +328,18 @@ ax.add_feature(cfeature.COASTLINE)
 ax.add_feature(cfeature.BORDERS, linestyle=':')
 ax.set_global()
 
-# Plot each node (country) on the map if we have coordinates
+# Plot each country on the map if we have coordinates
 for country in simplified_subgraph.nodes():
     if country in country_coords_dict:
         lat, lon = country_coords_dict[country]
         plt.plot(lon, lat, marker='o', color='red', markersize=5, transform=ccrs.PlateCarree())
-        plt.text(lon+1, lat+1, country, transform=ccrs.PlateCarree(), fontsize=8)
+        plt.text(lon + 1, lat + 1, country, transform=ccrs.PlateCarree(), fontsize=8)
 
-# Plot edges
 for u, v in simplified_subgraph.edges():
     if u in country_coords_dict and v in country_coords_dict:
         lat_u, lon_u = country_coords_dict[u]
         lat_v, lon_v = country_coords_dict[v]
         plt.plot([lon_u, lon_v], [lat_u, lat_v], color='blue', linewidth=1, transform=ccrs.PlateCarree())
 
-plt.title(f"Neighbors within {hops} hops of {most_unpopular_country} on a World Map")
+plt.title(f"Neighbors within {hops} hop(s) of {most_unpopular_country} on a World Map")
 plt.show()
