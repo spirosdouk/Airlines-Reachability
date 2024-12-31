@@ -231,7 +231,7 @@ plot_top_countries(
 )
 
 # ------------------------------------------------------------------------------------
-# Find the shortest path from United States to North Korea
+# Find the shortest path from Greece to 'Cocos (Keeling) Islands'
 source_country = 'Greece'
 target_country = 'Cocos (Keeling) Islands'
 
@@ -292,7 +292,127 @@ else:
     plt.title(f"Shortest Path from {source_country} to {target_country}")
     plt.show()
 
-# ------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
+# 3) AIRPORT-TO-AIRPORT GRAPH
+G_airports = nx.Graph()
+
+# Build the airport graph from "routes"
+for _, row in routes.iterrows():
+    source_ap = row['Source_airport']
+    dest_ap   = row['Destination_airport']
+    stops     = row['Stops']
+    if pd.notna(source_ap) and pd.notna(dest_ap):
+        G_airports.add_edge(
+            source_ap, 
+            dest_ap, 
+            stops=stops if pd.notna(stops) else 0
+        )
+
+print("\nAirport Graph Information:")
+print(f"Number of airport nodes: {G_airports.number_of_nodes()}")
+print(f"Number of airport edges: {G_airports.number_of_edges()}")
+
+source_country = "Greece"
+target_country = "Cocos (Keeling) Islands"
+ 
+# Gather all IATA codes 
+# filter so we only keep those that are actually in the G_airports graph.
+source_country_airports = [
+    ap for ap in airports[airports['Country'] == source_country]['IATA'].dropna().unique()
+    if ap in G_airports.nodes
+]
+target_country_airports = [
+    ap for ap in airports[airports['Country'] == target_country]['IATA'].dropna().unique()
+    if ap in G_airports.nodes
+]
+
+print(f"\nValid airports in '{source_country}': {source_country_airports}")
+print(f"Valid airports in '{target_country}': {target_country_airports}")
+
+# If no valid airports found, skip
+if len(source_country_airports) == 0 or len(target_country_airports) == 0:
+    print(f"No valid airports found for {source_country} or {target_country} in the graph.")
+    best_path = []
+else:
+    best_path = None
+    best_length = float('inf')
+
+    for s_ap in source_country_airports:
+        for t_ap in target_country_airports:
+            try:
+                path = nx.shortest_path(G_airports, source=s_ap, target=t_ap)
+                if len(path) < best_length:
+                    best_length = len(path)
+                    best_path = path
+            except nx.NetworkXNoPath:
+                continue
+            except nx.NodeNotFound:
+                continue
+
+    if best_path is None:
+        print(f"No connecting route found between airports of {source_country} and {target_country}.")
+        best_path = []
+    else:
+        # best minimal-hop path
+        path_length = len(best_path) - 1
+        print(f"\nBest (shortest) airport-to-airport path from {source_country} to {target_country}:")
+        print(" -> ".join(best_path))
+        print(f"Number of hops: {path_length}")
+
+if len(best_path) <= 1:
+    print("No path to plot (or only a single node).")
+else:
+    airport_coords_dict = {}
+    for _, row in airports.iterrows():
+        iata = row['IATA']
+        lat  = row['Latitude']
+        lon  = row['Longitude']
+        if pd.notna(iata) and pd.notna(lat) and pd.notna(lon):
+            airport_coords_dict[iata] = (lat, lon)
+
+    path_edges = list(zip(best_path, best_path[1:]))
+
+    plt.figure(figsize=(12, 8))
+    ax = plt.axes(projection=ccrs.PlateCarree())
+    ax.add_feature(cfeature.COASTLINE)
+    ax.add_feature(cfeature.BORDERS, linestyle=':')
+    ax.set_global()
+
+    # Plot each airport in the path
+    for i, ap in enumerate(best_path):
+        if ap in airport_coords_dict:
+            lat, lon = airport_coords_dict[ap]
+            plt.plot(
+                lon, lat, 
+                marker='o', color='red', markersize=5, 
+                transform=ccrs.PlateCarree()
+            )
+            plt.text(
+                lon + 1, lat + 1, f"{ap}\n({i})",
+                transform=ccrs.PlateCarree(),
+                fontsize=8, ha='center', va='bottom'
+            )
+
+    # Plot edges as arrows
+    for u, v in path_edges:
+        if u in airport_coords_dict and v in airport_coords_dict:
+            lat_u, lon_u = airport_coords_dict[u]
+            lat_v, lon_v = airport_coords_dict[v]
+            arrow = FancyArrowPatch(
+                (lon_u, lat_u), (lon_v, lat_v),
+                transform=ccrs.PlateCarree(),
+                arrowstyle='->', color='blue',
+                mutation_scale=15, linewidth=1
+            )
+            ax.add_patch(arrow)
+
+    plt.title(f"Shortest Airport-to-Airport Path: {source_country} -> {target_country}")
+    plt.show()
+
+
+
+# -----------------------------------------------------------------------------
+# 4) NEIGHBORS OF A SELECTED COUNTRY (HERE BASED ON DEGREE CENTRALITY)
 degree_df_sorted_asc = degree_df.sort_values(by='Degree_Centrality', ascending=True)
 
 most_unpopular_country = degree_df_sorted_asc.iloc[1]['Country']
@@ -307,7 +427,6 @@ for target, path in neighbors_within_hops.items():
         edges_in_path = list(zip(path, path[1:]))
         edges_in_shortest_paths.update(edges_in_path)
 
-# Create the subgraph using only the edges
 simplified_subgraph = nx.Graph()
 simplified_subgraph.add_edges_from(edges_in_shortest_paths)
 
